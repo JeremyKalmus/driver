@@ -1,16 +1,14 @@
 # Rig Driver - Gas Town Plugin Manifest
 name: driver
-version: 0.1.0
+version: 0.2.0
 description: |
-  Coordination plugin for single-point-of-contact per rig.
+  Hierarchical bead creation with enforced parent-child relationships.
 
-  The Driver is your dedicated crew member that:
-  - Triages incoming requests (quick fix, bug, feature, architecture)
-  - Creates consistent beads (no more spec.md files)
-  - Routes to appropriate workers (Keeper, Mayor, direct polecat)
-  - Monitors epic progress until completion
-
-  Talk to the Driver. Let the Driver talk to everyone else.
+  This plugin ensures consistent Epic -> Task -> Subtask hierarchy:
+  - Blocks direct 'bd create' via Claude Code hook
+  - Provides /bead skill with strict hierarchy enforcement
+  - Consistent description format for auditability
+  - Visual hierarchy confirmation after creation
 type: coordination
 
 author: "Jeremy Kalmus"
@@ -43,13 +41,8 @@ install:
         - .claude/commands/
         - mayor/.claude/commands/
         - refinery/.claude/commands/
-    - source: commands/triage.md
-      targets:
-        - .claude/commands/
-    - source: commands/epic-status.md
-      targets:
-        - .claude/commands/
-        - mayor/.claude/commands/
+        - polecats/.claude/commands/
+        - crew/.claude/commands/
 
 # Uninstallation
 uninstall:
@@ -58,57 +51,37 @@ uninstall:
 # Slash commands provided
 commands:
   bead:
-    description: "Create consistent beads (replaces spec.md files)"
-    usage: "/bead <type> <title> [--parent <id>] [--spec <inline or file>]"
-    for: [driver, mayor, polecat, crew]
+    description: "Create beads with enforced hierarchy (Epic -> Task -> Subtask)"
+    usage: "/bead <type> \"<title>\" [parent-id] [--spec \"<description>\"]"
+    for: [driver, mayor, polecat, crew, refinery]
     file: commands/bead.md
-
-  triage:
-    description: "Classify request and recommend action"
-    usage: "/triage <request description>"
-    for: [driver, crew]
-    file: commands/triage.md
-
-  epic-status:
-    description: "Check progress of an epic and its children"
-    usage: "/epic-status <epic-id>"
-    for: [driver, mayor]
-    file: commands/epic-status.md
 
 # Configuration schema
 config_schema:
   type: object
   properties:
-    auto-route:
+    require-parent-for-tasks:
       type: boolean
       default: true
       description: |
-        Automatically route triaged requests to appropriate workers
-        (Keeper for architecture, Mayor for work slinging)
-
-    require-keeper-for-features:
-      type: boolean
-      default: false
-      description: |
-        Always route feature requests through Keeper first
+        Require parent ID when creating tasks and bugs.
+        Enforces Epic -> Task -> Subtask hierarchy.
   required: []
 
 # Integration architecture
 integration:
-  # Single entry point
-  entry:
-    who: Driver
-    receives: "All user requests for this rig"
-    outputs:
-      - "Beads (epics, issues, tasks)"
-      - "Mail to Keeper (architecture)"
-      - "Mail to Mayor (work slinging)"
+  # Hook-based enforcement
+  hooks:
+    PreToolUse:
+      matcher: "Bash"
+      action: "Block 'bd create' commands, redirect to /bead skill"
+      script: ".claude/hooks/block-bd-create.sh"
 
-  # Epic monitoring loop
-  patrol:
-    formula: "mol-driver-patrol"
-    when: "Active epics exist"
-    action: "Check progress, nudge blockers, report completion"
+  # Hierarchy enforcement
+  hierarchy:
+    epic: "Top-level container, no parent allowed"
+    task: "Requires parent (epic or task)"
+    bug: "Requires parent (epic or task)"
 
 # Documentation
 docs:

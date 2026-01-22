@@ -1,16 +1,17 @@
 #!/bin/bash
 #
 # Rig Driver - Installation Script
-# Installs Driver coordination system on a Gas Town rig
+# Installs Driver plugin for hierarchical bead creation
 #
-# Usage: ./install-driver.sh [options] <rig-path>
+# Usage: ./install-driver.sh [options] <town-path>
 #
 # Options:
-#   --skip-mayor       Don't install Mayor briefing
-#   --skip-polecats    Don't install Polecat briefing
-#   --skip-crew        Don't set up Driver crew member
+#   --skip-mayor       Don't install to Mayor
+#   --skip-crew        Don't install to Crew
 #   --force            Overwrite existing files
 #   -h, --help         Show this help message
+#
+# Installs to: crew, mayor (NOT witness, refinery, deacon)
 #
 
 set -e
@@ -25,7 +26,6 @@ NC='\033[0m' # No Color
 # Default values
 FORCE=false
 SKIP_MAYOR=false
-SKIP_POLECATS=false
 SKIP_CREW=false
 
 # Get the directory where this script lives (driver plugin root)
@@ -34,8 +34,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 print_header() {
     echo -e "${BLUE}"
     echo "╔═══════════════════════════════════════════════════════════════╗"
-    echo "║              Rig Driver - Installation                        ║"
-    echo "║     Single point of contact for your Gas Town rig             ║"
+    echo "║              Driver Plugin - Installation                     ║"
+    echo "║     Hierarchical bead creation (Epic -> Task -> Subtask)      ║"
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -57,29 +57,86 @@ print_info() {
 }
 
 usage() {
-    echo "Usage: $0 [options] <rig-path>"
+    echo "Usage: $0 [options] <town-path>"
     echo ""
-    echo "Install Driver coordination system on a Gas Town rig."
+    echo "Install Driver plugin for hierarchical bead creation."
     echo ""
     echo "This plugin provides:"
-    echo "  - /bead command for consistent bead creation (all agents)"
-    echo "  - /triage command for request classification"
-    echo "  - /epic-status command for progress monitoring"
-    echo "  - MAYOR-BRIEFING.md for Mayor bead protocols"
-    echo "  - POLECAT-BRIEFING.md for Polecat status updates"
-    echo "  - Driver crew member setup (optional)"
+    echo "  - /bead command with enforced hierarchy"
+    echo "  - PreToolUse hook that blocks direct 'bd create'"
+    echo "  - Consistent Epic -> Task -> Subtask relationships"
+    echo ""
+    echo "Installs to: crew, mayor"
+    echo "Does NOT install to: witness, refinery, deacon"
     echo ""
     echo "Options:"
-    echo "  --skip-mayor       Don't install Mayor briefing/commands"
-    echo "  --skip-polecats    Don't install Polecat briefing/commands"
-    echo "  --skip-crew        Don't set up Driver crew member template"
+    echo "  --skip-mayor       Don't install to Mayor"
+    echo "  --skip-crew        Don't install to Crew"
     echo "  --force            Overwrite existing files"
     echo "  -h, --help         Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 ~/gt/myproject                    # Full install"
-    echo "  $0 --skip-crew ~/gt/myproject        # Just commands, no crew"
-    echo "  $0 --force ~/gt/myproject            # Reinstall everything"
+    echo "  $0 ~/gt                     # Install to town"
+    echo "  $0 --skip-mayor ~/gt        # Crew only"
+    echo "  $0 --force ~/gt             # Reinstall everything"
+}
+
+# Function to merge PreToolUse hook into existing settings.json
+merge_hook_into_settings() {
+    local settings_file="$1"
+    local hook_script_path="$2"
+
+    # Check if jq is available
+    if ! command -v jq &> /dev/null; then
+        print_error "jq is required but not installed. Please install jq."
+        return 1
+    fi
+
+    # Create settings if doesn't exist
+    if [[ ! -f "$settings_file" ]]; then
+        cat > "$settings_file" << EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$hook_script_path"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+        return 0
+    fi
+
+    # Check if our hook is already installed
+    if grep -q "block-bd-create.sh" "$settings_file" 2>/dev/null; then
+        print_warning "Hook already installed in $settings_file"
+        return 0
+    fi
+
+    # Create the new hook entry as single-line JSON
+    # Use single quotes to prevent bash expansion of $CLAUDE_PROJECT_DIR
+    local new_hook='{"matcher":"Bash","hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-bd-create.sh"}]}'
+
+    # Merge into existing settings
+    local temp_file=$(mktemp)
+
+    # Check if PreToolUse array exists
+    if jq -e '.hooks.PreToolUse' "$settings_file" > /dev/null 2>&1; then
+        # Append to existing PreToolUse array
+        jq --argjson newhook "$new_hook" '.hooks.PreToolUse += [$newhook]' "$settings_file" > "$temp_file"
+    else
+        # Create PreToolUse array
+        jq --argjson newhook "$new_hook" '.hooks.PreToolUse = [$newhook]' "$settings_file" > "$temp_file"
+    fi
+
+    mv "$temp_file" "$settings_file"
 }
 
 # Parse arguments
@@ -91,10 +148,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-mayor)
             SKIP_MAYOR=true
-            shift
-            ;;
-        --skip-polecats)
-            SKIP_POLECATS=true
             shift
             ;;
         --skip-crew)
@@ -111,31 +164,30 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            RIG_PATH="$1"
+            TOWN_PATH="$1"
             shift
             ;;
     esac
 done
 
-# Validate rig path
-if [[ -z "$RIG_PATH" ]]; then
-    print_error "No rig path specified"
+# Validate town path
+if [[ -z "$TOWN_PATH" ]]; then
+    print_error "No town path specified"
     usage
     exit 1
 fi
 
-if [[ ! -d "$RIG_PATH" ]]; then
-    print_error "Rig path does not exist: $RIG_PATH"
+if [[ ! -d "$TOWN_PATH" ]]; then
+    print_error "Town path does not exist: $TOWN_PATH"
     exit 1
 fi
 
 # Resolve to absolute path
-RIG_PATH="$(cd "$RIG_PATH" && pwd)"
-RIG_NAME="$(basename "$RIG_PATH")"
+TOWN_PATH="$(cd "$TOWN_PATH" && pwd)"
 
-# Check if this looks like a Gas Town rig
-if [[ ! -f "$RIG_PATH/config.json" ]] && [[ ! -d "$RIG_PATH/.beads" ]] && [[ ! -d "$RIG_PATH/mayor" ]]; then
-    print_warning "This doesn't look like a Gas Town rig (no config.json, .beads, or mayor)"
+# Check if this looks like a Gas Town
+if [[ ! -d "$TOWN_PATH/mayor" ]]; then
+    print_warning "This doesn't look like a Gas Town (no mayor/ directory)"
     read -p "Continue anyway? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -145,256 +197,175 @@ fi
 
 print_header
 
-echo "Installing Driver on rig: $RIG_NAME"
-echo "Path: $RIG_PATH"
+echo "Installing Driver plugin to: $TOWN_PATH"
 echo ""
 
-# Step 1: Create driver directory structure
-print_info "Creating Driver directory structure..."
+# ============================================================================
+# Step 1: Install hook script to a shared location
+# ============================================================================
+print_info "Installing hook script..."
 
-mkdir -p "$RIG_PATH/driver"
+HOOKS_DIR="$TOWN_PATH/.driver-hooks"
+mkdir -p "$HOOKS_DIR"
 
-print_success "Created driver/ directory"
+cp "$SCRIPT_DIR/.claude/hooks/block-bd-create.sh" "$HOOKS_DIR/"
+chmod +x "$HOOKS_DIR/block-bd-create.sh"
 
-# Step 2: Create driver config
-print_info "Creating Driver configuration..."
+print_success "Installed hook script to $HOOKS_DIR/"
 
-DRIVER_CONFIG="$RIG_PATH/driver/driver.yaml"
-
-if [[ -f "$DRIVER_CONFIG" ]] && [[ "$FORCE" != true ]]; then
-    print_warning "Skipping driver.yaml (exists, use --force to overwrite)"
-else
-    cat > "$DRIVER_CONFIG" << EOF
-# Rig Driver Configuration
-# Generated by install-driver.sh on $(date +%Y-%m-%d)
-
-driver:
-  # Automatically route triaged requests to appropriate workers
-  auto-route: true
-
-  # Always require Keeper review for features (if Keeper installed)
-  require-keeper-for-features: false
-
-  # Default bead type when not specified
-  default-type: task
-
-# Installation metadata
-installed:
-  date: "$(date +%Y-%m-%d)"
-  version: "0.1.0"
-EOF
-    print_success "Created driver.yaml"
-fi
-
-# Step 3: Install rig-level commands (available to all agents via rig .claude)
-print_info "Installing rig-level commands..."
-
-RIG_COMMANDS="$RIG_PATH/.claude/commands"
-mkdir -p "$RIG_COMMANDS"
-
-for cmd in bead.md triage.md epic-status.md; do
-    src="$SCRIPT_DIR/commands/$cmd"
-    dst="$RIG_COMMANDS/$cmd"
-
-    if [[ -f "$dst" ]] && [[ "$FORCE" != true ]]; then
-        print_warning "Skipping $cmd (exists, use --force to overwrite)"
-    else
-        if [[ -f "$src" ]]; then
-            cp "$src" "$dst"
-            print_success "Installed /$cmd to rig .claude/commands/"
-        else
-            print_error "Command not found: $src"
-        fi
-    fi
-done
-
-# Step 4: Install Mayor commands and briefing
-if [[ "$SKIP_MAYOR" != true ]]; then
-    print_info "Installing Mayor commands and briefing..."
-
-    MAYOR_CLAUDE=""
-
-    # Check for rig-level mayor
-    if [[ -d "$RIG_PATH/mayor/rig/.claude" ]]; then
-        MAYOR_CLAUDE="$RIG_PATH/mayor/rig/.claude"
-        MAYOR_RIG="$RIG_PATH/mayor/rig"
-    elif [[ -d "$RIG_PATH/mayor/rig" ]]; then
-        MAYOR_CLAUDE="$RIG_PATH/mayor/rig/.claude"
-        MAYOR_RIG="$RIG_PATH/mayor/rig"
-        mkdir -p "$MAYOR_CLAUDE"
-    fi
-
-    if [[ -n "$MAYOR_CLAUDE" ]]; then
-        mkdir -p "$MAYOR_CLAUDE/commands"
-        cp "$SCRIPT_DIR/commands/bead.md" "$MAYOR_CLAUDE/commands/"
-        cp "$SCRIPT_DIR/commands/epic-status.md" "$MAYOR_CLAUDE/commands/"
-        print_success "Installed /bead to Mayor"
-        print_success "Installed /epic-status to Mayor"
-
-        # Install briefing
-        mkdir -p "$MAYOR_RIG/driver"
-        cp "$SCRIPT_DIR/MAYOR-BRIEFING.md" "$MAYOR_RIG/driver/"
-        print_success "Installed MAYOR-BRIEFING.md"
-    else
-        print_warning "Mayor directory not found, skipping Mayor install"
-    fi
-fi
-
-# Step 5: Install Polecat commands and briefing
-if [[ "$SKIP_POLECATS" != true ]]; then
-    print_info "Installing Polecat commands and briefing..."
-
-    POLECAT_CLAUDE=""
-
-    if [[ -d "$RIG_PATH/polecats/.claude" ]]; then
-        POLECAT_CLAUDE="$RIG_PATH/polecats/.claude"
-    elif [[ -d "$RIG_PATH/polecats" ]]; then
-        POLECAT_CLAUDE="$RIG_PATH/polecats/.claude"
-        mkdir -p "$POLECAT_CLAUDE"
-    fi
-
-    if [[ -n "$POLECAT_CLAUDE" ]]; then
-        mkdir -p "$POLECAT_CLAUDE/commands"
-        # Polecats only get /bead for discovered bugs
-        cp "$SCRIPT_DIR/commands/bead.md" "$POLECAT_CLAUDE/commands/"
-        print_success "Installed /bead to Polecats (for discovered bugs)"
-
-        # Install briefing
-        mkdir -p "$RIG_PATH/polecats/driver"
-        cp "$SCRIPT_DIR/POLECAT-BRIEFING.md" "$RIG_PATH/polecats/driver/"
-        print_success "Installed POLECAT-BRIEFING.md"
-    else
-        print_warning "Polecats directory not found, skipping Polecat install"
-    fi
-fi
-
-# Step 6: Install Refinery commands
-print_info "Installing Refinery commands..."
-
-REFINERY_CLAUDE=""
-
-if [[ -d "$RIG_PATH/refinery/rig/.claude" ]]; then
-    REFINERY_CLAUDE="$RIG_PATH/refinery/rig/.claude"
-elif [[ -d "$RIG_PATH/refinery/rig" ]]; then
-    REFINERY_CLAUDE="$RIG_PATH/refinery/rig/.claude"
-    mkdir -p "$REFINERY_CLAUDE"
-fi
-
-if [[ -n "$REFINERY_CLAUDE" ]]; then
-    mkdir -p "$REFINERY_CLAUDE/commands"
-    cp "$SCRIPT_DIR/commands/bead.md" "$REFINERY_CLAUDE/commands/"
-    print_success "Installed /bead to Refinery"
-else
-    print_warning "Refinery directory not found, skipping Refinery install"
-fi
-
-# Step 7: Set up Driver crew member template (optional)
+# ============================================================================
+# Step 2: Install to Crew (all rigs)
+# ============================================================================
 if [[ "$SKIP_CREW" != true ]]; then
-    print_info "Setting up Driver crew member template..."
+    print_info "Installing to Crew agents..."
 
-    CREW_DIR="$RIG_PATH/crew"
+    # Find all rig directories that have a crew/ subdirectory
+    for rig_dir in "$TOWN_PATH"/*/; do
+        rig_name=$(basename "$rig_dir")
 
-    if [[ -d "$CREW_DIR" ]] || [[ -d "$RIG_PATH/crew/.claude" ]]; then
-        # Create template for driver crew member
-        DRIVER_TEMPLATE="$RIG_PATH/driver/crew-template"
-        mkdir -p "$DRIVER_TEMPLATE/agent"
+        # Skip non-rig directories
+        [[ "$rig_name" == "mayor" ]] && continue
+        [[ "$rig_name" == ".driver-hooks" ]] && continue
+        [[ ! -d "$rig_dir/crew" ]] && continue
 
-        cp "$SCRIPT_DIR/agent/CLAUDE.md" "$DRIVER_TEMPLATE/agent/"
+        CREW_CLAUDE="$rig_dir/crew/.claude"
 
-        cat > "$DRIVER_TEMPLATE/README.md" << 'EOF'
-# Driver Crew Member Template
+        if [[ -d "$CREW_CLAUDE" ]] || [[ -d "$rig_dir/crew" ]]; then
+            mkdir -p "$CREW_CLAUDE/commands"
+            mkdir -p "$CREW_CLAUDE/hooks"
 
-To create a Driver crew member:
+            # Copy /bead command
+            if [[ -f "$SCRIPT_DIR/commands/bead.md" ]]; then
+                cp "$SCRIPT_DIR/commands/bead.md" "$CREW_CLAUDE/commands/"
+                print_success "Installed /bead to $rig_name/crew"
+            fi
 
-```bash
-# 1. Add the crew member
-gt crew add driver
+            # Copy hook script locally (for portability)
+            cp "$SCRIPT_DIR/.claude/hooks/block-bd-create.sh" "$CREW_CLAUDE/hooks/"
+            chmod +x "$CREW_CLAUDE/hooks/block-bd-create.sh"
 
-# 2. Copy the agent context
-cp driver/crew-template/agent/CLAUDE.md crew/driver/agent/CLAUDE.md
+            # Merge hook into settings.json
+            HOOK_PATH="\"\$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-bd-create.sh"
+            merge_hook_into_settings "$CREW_CLAUDE/settings.json" "$HOOK_PATH"
+            print_success "Installed hook to $rig_name/crew"
+        fi
+    done
+fi
 
-# 3. Chat with your Driver
-gt crew chat driver
-```
+# ============================================================================
+# Step 3: Install to Mayor
+# ============================================================================
+if [[ "$SKIP_MAYOR" != true ]]; then
+    print_info "Installing to Mayor..."
 
-The Driver is your single point of contact for this rig.
-EOF
+    MAYOR_PATH="$TOWN_PATH/mayor"
 
-        print_success "Created crew-template/ for Driver crew member"
+    if [[ -d "$MAYOR_PATH" ]]; then
+        MAYOR_CLAUDE="$MAYOR_PATH/.claude"
+        mkdir -p "$MAYOR_CLAUDE/commands"
+        mkdir -p "$MAYOR_CLAUDE/hooks"
+
+        # Copy /bead command
+        if [[ -f "$SCRIPT_DIR/commands/bead.md" ]]; then
+            cp "$SCRIPT_DIR/commands/bead.md" "$MAYOR_CLAUDE/commands/"
+            print_success "Installed /bead to Mayor"
+        fi
+
+        # Copy hook script locally
+        cp "$SCRIPT_DIR/.claude/hooks/block-bd-create.sh" "$MAYOR_CLAUDE/hooks/"
+        chmod +x "$MAYOR_CLAUDE/hooks/block-bd-create.sh"
+
+        # Merge hook into settings.json
+        HOOK_PATH="\"\$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-bd-create.sh"
+        merge_hook_into_settings "$MAYOR_CLAUDE/settings.json" "$HOOK_PATH"
+        print_success "Installed hook to Mayor"
     else
-        print_warning "Crew directory not found, skipping crew template"
+        print_warning "Mayor directory not found at $MAYOR_PATH"
     fi
 fi
 
-# Step 8: Create instructions file
-print_info "Creating Driver instructions..."
+# ============================================================================
+# Step 4: Create installation record
+# ============================================================================
+print_info "Creating installation record..."
 
-cat > "$RIG_PATH/driver/DRIVER-INSTRUCTIONS.md" << 'EOF'
-# Driver Installation Complete
+INSTALL_RECORD="$TOWN_PATH/.driver-hooks/INSTALL-INFO.md"
+cat > "$INSTALL_RECORD" << EOF
+# Driver Plugin Installation
+
+Installed: $(date)
+Version: 0.2.0
 
 ## What Was Installed
 
-Commands (available to all agents via /command):
-- `/bead` - Create consistent beads with required format
-- `/triage` - Classify requests and recommend actions
-- `/epic-status` - Check epic progress and blockers
+### Hook Script
+- \`.driver-hooks/block-bd-create.sh\` - Blocks direct \`bd create\` commands
 
-Briefings:
-- `mayor/rig/driver/MAYOR-BRIEFING.md` - How Mayor should use beads
-- `polecats/driver/POLECAT-BRIEFING.md` - How Polecats should update status
-
-## The Bead Contract
-
-Every bead MUST have:
-
-```markdown
-## Summary
-What and why.
-
-## Acceptance Criteria
-- [ ] Testable criterion 1
-- [ ] Testable criterion 2
-
-## Context
-Background, parent, Keeper ADR.
-
-## Constraints
-Technical limits, forbidden patterns.
-```
-
-## Creating a Driver Crew Member
-
-If you want a dedicated Driver to talk to:
-
-```bash
-gt crew add driver
-cp driver/crew-template/agent/CLAUDE.md crew/driver/agent/CLAUDE.md
-gt crew chat driver
-```
-
-## Using Without a Dedicated Driver
-
-All agents now have access to the commands. Mayor and Polecats have their
-briefings. The standardization works even without a dedicated Driver crew member.
+### Locations Updated
 EOF
 
-print_success "Created DRIVER-INSTRUCTIONS.md"
+if [[ "$SKIP_CREW" != true ]]; then
+    echo "- Crew agents in all rigs" >> "$INSTALL_RECORD"
+fi
+if [[ "$SKIP_MAYOR" != true ]]; then
+    echo "- Mayor" >> "$INSTALL_RECORD"
+fi
 
+cat >> "$INSTALL_RECORD" << 'EOF'
+
+## Not Updated (by design)
+- Witness
+- Refinery
+- Deacon
+
+These agents may create beads but typically not work-related items that need hierarchy.
+
+## How It Works
+
+1. When an agent tries `bd create`, the PreToolUse hook blocks it
+2. The hook tells the agent to use `/bead` instead
+3. `/bead` enforces:
+   - Epic: no parent (top-level container)
+   - Task: parent required (under epic or task)
+   - Bug: parent required (under epic or task)
+
+## To Uninstall
+
+Remove the following from each location's `.claude/settings.json`:
+- The PreToolUse hook entry referencing `block-bd-create.sh`
+
+Then delete:
+- `.driver-hooks/` directory
+- `.claude/hooks/block-bd-create.sh` from each location
+- `.claude/commands/bead.md` from each location
+EOF
+
+print_success "Created installation record"
+
+# ============================================================================
 # Summary
+# ============================================================================
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  Driver installation complete!${NC}"
+echo -e "${GREEN}  Driver plugin installation complete!${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo "Installed to: $RIG_PATH"
+echo "Installed to: $TOWN_PATH"
 echo ""
-echo "Commands available:"
-echo "  /bead <type> <title>     - Create consistent beads"
-echo "  /triage <request>        - Classify and route requests"
-echo "  /epic-status <epic-id>   - Check epic progress"
+echo "Agents updated:"
+[[ "$SKIP_CREW" != true ]] && echo "  ✓ Crew (all rigs)"
+[[ "$SKIP_MAYOR" != true ]] && echo "  ✓ Mayor"
 echo ""
-echo "Next steps:"
-echo "  1. Review driver/DRIVER-INSTRUCTIONS.md"
-echo "  2. (Optional) Create Driver crew: gt crew add driver"
-echo "  3. Start using /bead for all bead creation"
+echo "Agents NOT updated (by design):"
+echo "  - Witness"
+echo "  - Refinery"
+echo "  - Deacon"
+echo ""
+echo "Usage:"
+echo "  /bead epic \"Feature title\"              # Create top-level epic"
+echo "  /bead task \"Task title\" <parent-id>    # Create task under parent"
+echo "  /bead bug \"Bug title\" <parent-id>      # Create bug under parent"
+echo ""
+echo "Direct 'bd create' commands are now blocked for crew and mayor."
+echo "They will be prompted to use /bead instead."
 echo ""
